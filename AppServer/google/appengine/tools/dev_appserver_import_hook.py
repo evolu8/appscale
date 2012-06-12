@@ -700,7 +700,7 @@ class HardenedModulesHook(object):
       'RIPEMD',
       'SHA256',
       'XOR',
-
+      'zmq',
       '_Crypto_Cipher__AES',
       '_Crypto_Cipher__ARC2',
       '_Crypto_Cipher__ARC4',
@@ -781,6 +781,7 @@ class HardenedModulesHook(object):
     '_yaml',
     'parser',
     'strop',
+    'zmq'
 
 
 
@@ -822,6 +823,7 @@ class HardenedModulesHook(object):
       '_sort',
       'umath',
       'umath_tests',
+      'zmq'
     ],
     'PIL': ['_imaging', '_imagingcms', '_imagingft', '_imagingmath'],
 
