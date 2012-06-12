@@ -50,6 +50,33 @@ export LC_ALL=en_US.UTF-8
 locale-gen en_US.UTF-8
 dpkg-reconfigure locales
 
+#add zmq to the mix
+apt-get install -y libtool automake uuid-dev e2fsprogs-dev gcc-c++
+apt-get install -y python-setuptools-dev
+apt-get install zeromq-bin libzmq-dbg libzmq-dev libzmq0
+apt-get install -y uuid-dev
+apt-get install -y g++
+wget http://download.zeromq.org/zeromq-2.1.11.tar.gz
+tar -zxvf zeromq-2.1.11.tar.gz
+cd zeromq-2.1.11
+chmod +x autogen.sh
+./autogen.sh
+chmod +x configure
+./configure --with-pgm
+make
+make install
+cd ..
+wget https://github.com/zeromq/pyzmq/downloads/pyzmq-2.1.10.tar.gz
+tar -zxvf pyzmq-2.1.10.tar.gz
+cd pyzmq-2.1.10
+apt-get install -y python-dev
+export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+ldconfig
+echo /usr/local/lib >> /etc/ld.so.conf.d/A2Z.conf
+python setup.py configure --zmq=/usr/local/lib
+python setup.py install
+export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
 # fix /etc/hosts file for collectd installation
 HOSTNAME=`hostname`
 if [ `grep "$HOSTNAME" /etc/hosts | wc -l` -eq 0 ]; then
