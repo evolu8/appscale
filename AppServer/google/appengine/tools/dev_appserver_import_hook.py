@@ -300,6 +300,9 @@ class FakeFile(file):
   ALLOWED_SITE_PACKAGE_DIRS = set(
       os.path.normcase(os.path.abspath(os.path.join(SITE_PACKAGES, path)))
       for path in [
+                   
+                   [os.path.join('zmq')],
+          GeneratePythonPaths('zmq', '__init__'),
 
           ])
 

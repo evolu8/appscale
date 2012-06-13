@@ -19,7 +19,7 @@ apt-get -y install curl
 curl -d "key=appscale" http://heart-beat.appspot.com/sign
 
 export APPSCALE_HOME_RUNTIME=`pwd`
-
+add-apt-repository ppa:fkrull/deadsnakes
 apt-get update
 
 if [ "$DIST" = "lucid" ]; then
