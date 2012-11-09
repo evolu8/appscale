@@ -340,7 +340,7 @@ module HelperFunctions
       env_vars['APPNAME'] = app_name
       env_vars['GOMAXPROCS'] = self.get_num_cpus()
 
-      start_cmd = [ "python2.5 ",
+      start_cmd = [ "python2.7 ",
              "#{APPSCALE_HOME}/AppServer/dev_appserver.py",
              "-p #{port}",
              "--cookie_secret #{secret}",
@@ -358,6 +358,8 @@ module HelperFunctions
              "-a #{private_ip}",
              #">> /var/apps/#{app_name}/log/server.log 2>&1 &"
              ].join(' ')
+             
+      self.shell('echo "' + start_cmd + '" >> ~/debug')       
       stop_cmd = "ps ax | grep #{start_cmd} | grep -v grep | awk '{ print $1 }' | xargs -d '\n' kill -9"
     elsif app_language == "java"
       if File.exist?("/var/apps/#{app_name}/app/war/WEB-INF/web.xml") == false and File.exist?("/var/apps/#{app_name}/app/app.yaml") == false
