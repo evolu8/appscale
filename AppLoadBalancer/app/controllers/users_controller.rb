@@ -101,11 +101,12 @@ class UsersController < ApplicationController
       render :action => :login
     end
   end
+  
 
   def logout
     create_token(get_remote_ip, "invalid") # clear the token out
     reset_session
-    cookies[:dev_appserver_login] = { :value => nil, :domain => UserTools.local_ip, :expires => Time.at(0) }
+    cookies[:dev_appserver_login] = { :value => nil, :domain => "appscale", :expires => Time.at(0) }
     flash[:notice] = "You have been logged out."
     redirect_to url_for(:controller => :landing, :action => :index)
   end

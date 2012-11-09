@@ -137,6 +137,7 @@ def LoginRedirect(login_url,
   NGINX_HOST = os.environ['NGINX_HOST']
   NGINX_PORT = os.environ['NGINX_PORT']
   hostname = NGINX_HOST
+  hostname = "appscale"
   port = NGINX_PORT
   dest_url = "http://%s:%s%s" % (hostname, port, relative_url)
   redirect_url = 'http://%s:%s%s?%s=%s' % (hostname,
@@ -179,6 +180,7 @@ def main():
   LOGIN_SERVER = os.environ['LOGIN_SERVER']
 
   nginx_url = os.environ['NGINX_HOST']
+  nginx_url="appscale"
   nginx_port = os.environ['NGINX_PORT']
   ah_login_url = 'http://' + nginx_url + ":" + nginx_port + ah_path
 
@@ -202,7 +204,7 @@ def main():
     suffix = re.search(pattern, continue_url)
     if suffix:
       continue_url = "http://" + nginx_url + ":" + nginx_port + suffix.group(1)
-
+  LOGIN_SERVER="appscale"
   login_service_endpoint = "https://"+LOGIN_SERVER+"/login"
   if action.lower() == LOGOUT_ACTION.lower():
     Logout(continue_url, sys.stdout)
