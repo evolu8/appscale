@@ -6,12 +6,13 @@ require 'rubygems'
 require 'json'
 
 
-# Imports for other AppController libraries
+# Imports for other NeptuneManager libraries
 $:.unshift File.join(File.dirname(__FILE__), "..", "..")
 require 'neptune_manager'
 
 
 $:.unshift File.join(File.dirname(__FILE__), "..")
+require 'neptune_manager_client'
 require 'zkinterface'
 
 
@@ -94,7 +95,7 @@ class NeptuneManager
   # take a while.
   # TODO(cgb): Maybe only start rabbitmq if we get an item from the queue that
   # specifies it should be used?
-  MAX_IDLE_TIME = 300
+  MAX_IDLE_TIME = 30000
 
 
   # A mapping of Amazon EC2 instance types that maps instance types to
@@ -142,20 +143,25 @@ class NeptuneManager
   def get_supported_babel_engines(job_data, secret)
     return BAD_SECRET_MSG if !valid_secret?(secret)
 
-    NeptuneManager.log("checking supported engines for job data #{job_data.inspect}")
+    NeptuneManager.log("checking supported engines for job data " +
+      "#{job_data.inspect}")
 
     # all jobs can use the internal engines
     engines = INTERNAL_ENGINES
 
     # but not necessarily the others, so check them one by one
-    engines << get_engines_for_creds(job_data, AMAZON_CREDENTIALS, AMAZON_ENGINES)
-    engines << get_engines_for_creds(job_data, AZURE_CREDENTIALS, AZURE_ENGINES)
-    engines << get_engines_for_creds(job_data, GOOGLE_CREDENTIALS, GOOGLE_ENGINES)
+    engines << get_engines_for_creds(job_data, AMAZON_CREDENTIALS, 
+      AMAZON_ENGINES)
+    engines << get_engines_for_creds(job_data, AZURE_CREDENTIALS, 
+      AZURE_ENGINES)
+    engines << get_engines_for_creds(job_data, GOOGLE_CREDENTIALS, 
+      GOOGLE_ENGINES)
    
     # since we're appending arrays to arrays but want it to be a 1D array
     engines.flatten!.uniq!
 
-    NeptuneManager.log("supported engines for job data #{job_data.inspect} are [#{engines.join(', ')}]")
+    NeptuneManager.log("supported engines for job data #{job_data.inspect} " +
+      "are [#{engines.join(', ')}]")
 
     return engines
   end
@@ -176,6 +182,21 @@ class NeptuneManager
 
     NeptuneManager.log("adding engines #{engines_to_add.join(', ')}")
     return engines_to_add
+  end
+
+
+  # For each babel job given, determines which engines the job can be run over.
+  # 'jobs' is expected to be an Array of Hashes, where each Hash represents
+  # a single job's credentials. This method provides batch functionality for
+  # the 'get_supported_babel_engines' method.
+  def batch_get_supported_babel_engines(jobs, secret)
+    return BAD_SECRET_MSG unless valid_secret?(secret)
+
+    batch_results = {"success" => true}
+    jobs.each { |job|
+      batch_results[job] = get_supported_babel_engines(job, secret)
+    }
+    return batch_results
   end
 
 
@@ -207,7 +228,9 @@ class NeptuneManager
       NeptuneManager.log("prejob - this job's data is #{job.inspect}")
     }
 
+    threads = []
     jobs.each { |job|
+      threads << Thread.new {
       job_data = job.dup
       NeptuneManager.log("This job's data is #{job_data.inspect}")
 
@@ -237,8 +260,10 @@ class NeptuneManager
         where_tasks_were_run << RUN_VIA_REMOTE_ENGINE
         next
       end
+      }
     }
 
+    threads.each { |t| t.join }
     return where_tasks_were_run
   end
 
@@ -328,18 +353,20 @@ class NeptuneManager
   # Nodes that run as babel_slaves are workers in the system. They ask the
   # master what queues tasks are stored on, and try to execute a configurable
   # number of tasks at a time.
-  def start_babel_slave()
-    Thread.new {
+  def start_babel_slave(max_iterations=1000000)
     NeptuneManager.log("#{my_node.private_ip} is starting babel slave")
 
+    current_iteration = 0
     time_spent_idle = 0.0
     loop {
+      break if current_iteration >= max_iterations
       queues = get_queues_from_shadow()
       cores_per_machine = HelperFunctions.get_num_cpus()
       tasks = get_n_items_of_work(cores_per_machine, queues)
       if tasks.length.zero?
         if time_spent_idle > MAX_IDLE_TIME
-          NeptuneManager.log("Spent too much time idle - reverting to open for now")
+          NeptuneManager.log("Spent too much time idle - reverting to open " +
+            "for now")
           break
         else
           NeptuneManager.log("no tasks found, waiting for more to arrive")
@@ -351,6 +378,7 @@ class NeptuneManager
         execute_multiple_tasks(tasks)
         time_spent_idle = 0.0
       end
+      current_iteration += 1
     }
 
     NeptuneManager.log("Removing babel slave roles from this node")
@@ -360,7 +388,6 @@ class NeptuneManager
       ZKInterface.add_roles_to_node(["open"], my_node)
     }
     NeptuneManager.log("Finished removing roles via ZooKeeper")
-    }
   end
 
 
@@ -379,12 +406,12 @@ class NeptuneManager
     NeptuneManager.copy_code_and_inputs_to_dir(job_data, dir)
     output, error = NeptuneManager.run_code(job_data, dir)
     NeptuneManager.write_babel_outputs(output, error, job_data)
-    NeptuneManager.cleanup(dir)
+    #NeptuneManager.cleanup(dir)
   end
 
 
   def self.create_temp_dir()
-    dir = "/tmp/babel-#{rand(10000)}/"
+    dir = "/var/cache/neptune/"
     FileUtils.mkdir_p(dir)
     return dir
   end
@@ -443,6 +470,7 @@ class NeptuneManager
     bucket, file = DatastoreS3.parse_s3_key(remote)
     remote_dir = file
     local_file = File.expand_path(local + "/" + remote_dir)
+
     NeptuneManager.log("downloading remote file #{remote} to local location #{local_file}")
     NeptuneManager.log("bucket is #{bucket}, file is #{file}")
 
@@ -534,13 +562,13 @@ class NeptuneManager
     total_output_time = output_storage_end_time - output_storage_start_time
     job_data['@metadata_info']['output_storage_time'] = total_output_time
 
-    local_input_storage_time = job_data['@metadata_info']['time_to_store_inputs']
-    total_input_time = job_data['@metadata_info']['input_storage_time']
+    local_input_storage_time = job_data['@metadata_info']['time_to_store_inputs'] || 0.0
+    total_input_time = job_data['@metadata_info']['input_storage_time'] || 0.0
     job_data['@metadata_info']['total_storage_time'] = local_input_storage_time + 
       total_input_time + total_output_time
 
     end_of_task_time = Time.now.to_f
-    start_of_task_time = job_data['@metadata_info']['received_task_at']
+    start_of_task_time = job_data['@metadata_info']['received_task_at'] || 0.0
     total_task_time = end_of_task_time - start_of_task_time
     job_data['@metadata_info']['total_task_time'] = total_task_time
 
@@ -579,8 +607,8 @@ class NeptuneManager
 
   def get_queues_from_shadow()
     secret = HelperFunctions.get_secret()
-    acc = AppControllerClient.new(get_shadow.public_ip, secret)
-    json_queue_and_cred_info = acc.get_queues_in_use()
+    nmc = NeptuneManagerClient.new(get_shadow.public_ip, secret)
+    json_queue_and_cred_info = nmc.get_queues_in_use()
     NeptuneManager.log("raw json received is '#{json_queue_and_cred_info}'")
     queue_and_cred_info = JSON.load(json_queue_and_cred_info)
     NeptuneManager.log("json formatted data is [#{queue_and_cred_info}]")

@@ -518,8 +518,8 @@ class MainHandler(tornado.web.RequestHandler):
     #Handling other queries
     else:
       global app_datastore
-      results=[]
-
+      results = []
+      versions = []
       if query.has_transaction():
         txn = query.transaction()
 
@@ -559,14 +559,15 @@ class MainHandler(tornado.web.RequestHandler):
           res = []
 
         # odds are versions
-        versions = res[1::2]
+        ver = res[1::2]
         # evens are encoded entities
         res = res[0::2]  
-        if len(versions) != len(res):
+        if len(ver) != len(res):
           return(api_base_pb.VoidProto().Encode(),
                  datastore_pb.Error.INTERNAL_ERROR,
                  'The query had a bad number of results.')
         results.extend(res)
+        versions.extend(ver)
       # convert to objects
       # Unless its marked as deleted
       # They are currently strings
@@ -1077,7 +1078,7 @@ class MainHandler(tornado.web.RequestHandler):
                   'No group entity or root key.')
         try:          
           locktime = time.time()
-          print root_key
+          #print root_key
           gotLock = zoo_keeper.acquireLock( app_id, txn.handle(), root_key)
           if PROFILE: appscale_log.write("ACQUIRELOCK %d %f\n"%(txn.handle(), time.time() - locktime))
         except zk.ZKTransactionException, zkex:

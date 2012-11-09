@@ -20,26 +20,25 @@ require 'zookeeper'
 
 # Imports for AppController libraries
 $:.unshift File.join(File.dirname(__FILE__), "lib")
-require 'helperfunctions'
-require 'cron_helper'
-require 'haproxy'
-require 'collectd'
-require 'nginx'
-require 'pbserver'
-require 'blobstore'
-require 'rabbitmq'
 require 'app_controller_client'
-require 'user_app_client'
+require 'blobstore'
+require 'custom_exceptions'
 require 'ejabberd'
-require 'repo'
-require 'zkinterface'
+require 'error_app'
+require 'collectd'
+require 'cron_helper'
 require 'godinterface'
+require 'haproxy'
+require 'helperfunctions'
 require 'infrastructure_manager_client'
 require 'neptune_manager_client'
+require 'pbserver'
+require 'nginx'
+require 'rabbitmq'
+require 'repo'
+require 'user_app_client'
+require 'zkinterface'
 
-
-class AppScaleException < Exception
-end
 
 
 WANT_OUTPUT = true
@@ -225,7 +224,7 @@ class Djinn
   # A boolean that indicates whether or not we should turn the firewall on,
   # and continuously keep it on. Should definitely be on for releases, and
   # on whenever possible.
-  FIREWALL_IS_ON = true
+  FIREWALL_IS_ON = false
 
 
   # The location on the local filesystem where the AppController writes
@@ -277,6 +276,11 @@ class Djinn
   # The size of the rotating buffers that we use to keep information on
   # the request rate and number of enqueued requests.
   NUM_DATA_POINTS = 10
+
+
+  # The minimum number of AppServers (for all applications) that should be run
+  # on this node.
+  MIN_APPSERVERS_ON_THIS_NODE = 1
 
 
   # The maximum number of AppServers (for all applications) that should be run
@@ -1160,6 +1164,9 @@ class Djinn
       return node if node.is_shadow?
     }
 
+    Djinn.log_debug("Couldn't find a shadow node in the following nodes: " +
+      "#{@nodes.join(', ')}")
+
     abort("No shadow nodes found.")
   end
 
@@ -1200,6 +1207,24 @@ class Djinn
       # Otherwise just select one randomly
       db_ips.sort_by { rand }[0]
     end
+  end
+
+  def get_all_appengine_nodes()
+    ae_nodes = []
+    @nodes.each { |node|
+      if node.is_appengine?
+        ae_nodes << node.private_ip
+      end
+    }
+    return ae_nodes
+  end
+
+  def get_load_balancer_ip()
+    @nodes.each { |node|
+      if node.is_load_balancer?
+        return node.public_ip
+      end
+    }
   end
 
   def valid_secret?(secret)
@@ -1779,6 +1804,9 @@ class Djinn
   # they are still running, and if not, to remedy it somehow.
   # Returns an Array of the roles that this process started.
   def ensure_all_roles_are_running
+    return  # this method appears to erroneously believe that non-failed nodes
+    # are failed.
+
     # Open nodes should be given priority to take on roles from other nodes.
     # if my node isnt open and there are open nodes, return
     #are_open_nodes = false
@@ -2099,7 +2127,7 @@ class Djinn
       retval = 0
       while retries > 0
         replication = @creds["replication"]
-        Djinn.log_run("MASTER_IP='localhost' LOCAL_DB_IP='localhost' python2.6 #{prime_script} #{replication}; echo $? > /tmp/retval")
+        Djinn.log_run("APPSCALE_HOME='#{APPSCALE_HOME}' MASTER_IP='localhost' LOCAL_DB_IP='localhost' python2.6 #{prime_script} #{replication}; echo $? > /tmp/retval")
         retval = `cat /tmp/retval`.to_i
         break if retval == 0
         Djinn.log_debug("Fail to create initial table. Retry #{retries} times.")
@@ -2140,12 +2168,6 @@ class Djinn
     if my_node.is_shadow? or my_node.is_appengine?
       start_sisyphus
       Repo.start(get_login.public_ip, @userappserver_private_ip)
-    end
-
-    # TODO(cgb): replace this with something more generic, in case other neptune
-    # jobs need it down the road
-    if my_node.is_babel_slave?
-      start_babel_slave
     end
 
     # appengine is started elsewhere
@@ -2221,7 +2243,7 @@ class Djinn
     zoo_connection = get_zk_connection_string(@nodes)
     PbServer.start(db_master_ip, @userappserver_private_ip, my_ip, table, zoo_connection)
     HAProxy.create_pbserver_config(my_node.private_ip, PbServer::PROXY_PORT, table)
-    Nginx.create_pbserver_config(my_ip, PbServer::PROXY_PORT)
+    Nginx.create_pbserver_config(my_node.private_ip, PbServer::PROXY_PORT)
     Nginx.restart()
 
     # TODO check the return value
@@ -2635,18 +2657,23 @@ HOSTS
     @state = "Starting up Load Balancer"
     Djinn.log_debug("Starting up Load Balancer")
 
-    my_ip = my_node.public_ip
-    HAProxy.create_app_load_balancer_config(my_node.private_ip, LoadBalancer.proxy_port)
-    Nginx.create_app_load_balancer_config(my_ip, LoadBalancer.proxy_port)
+    my_public = my_node.public_ip
+    my_private = my_node.private_ip
+    HAProxy.create_app_load_balancer_config(my_public, my_private, 
+      LoadBalancer.proxy_port)
+    Nginx.create_app_load_balancer_config(my_public, my_private, 
+      LoadBalancer.proxy_port)
     LoadBalancer.start
     Nginx.restart
     Collectd.restart
 
     head_node_ip = get_public_ip(@creds['hostname'])
-    if my_ip == head_node_ip
+    if my_public == head_node_ip
       # Only start monitoring on the head node
-      HAProxy.create_app_monitoring_config(my_node.private_ip, Monitoring.proxy_port)
-      Nginx.create_app_monitoring_config(my_ip, Monitoring.proxy_port)
+      HAProxy.create_app_monitoring_config(my_public, my_private, 
+        Monitoring.proxy_port)
+      Nginx.create_app_monitoring_config(my_public, my_private, 
+        Monitoring.proxy_port)
       Nginx.restart
       Monitoring.start
     end
@@ -2712,6 +2739,26 @@ HOSTS
     Djinn.log_debug("Stopping Shadow role")
   end
 
+  #
+  # Swaps out an application with one that relays an error message to the 
+  # developer. It will take the application that currently exists in the 
+  # application folder, deletes it, and places a templated app that prints out the 
+  # given error message. 
+  #
+  # Args: 
+  #   app_name: Name of application to construct an error application for
+  #   err_msg: A String message that will be displayed as 
+  #            the reason why we couldn't start their application.
+  #
+  # Returns: 
+  #   Returns: Nothing
+  #
+  def place_error_app(app_name, err_msg)
+    Djinn.log_debug("Placing error application for #{app_name} because of: #{err_msg}")
+    ea = ErrorApp.new(app_name, err_msg)
+    ea.generate() 
+  end
+
   def start_appengine()
     @state = "Preparing to run AppEngine apps if needed"
     Djinn.log_debug("Starting appengine - pbserver is at [#{@userappserver_private_ip}]")
@@ -2774,7 +2821,9 @@ HOSTS
       app_path = "#{app_dir}/#{app}.tar.gz"
       FileUtils.mkdir_p(app_dir)
        
-      copy_app_to_local(app)
+      if !copy_app_to_local(app)
+        place_error_app(app, "ERROR: Failed to copy app: #{app}")
+      end
       HelperFunctions.setup_app(app)
 
        
@@ -2782,17 +2831,43 @@ HOSTS
         CronHelper.update_cron(my_public, app_language, app)
         start_xmpp_for_app(app, app_language)
       end
+      app_number = @nginx_port - Nginx::START_PORT
+      proxy_port = HAProxy.app_listen_port(app_number)
+      login_ip = get_login.private_ip
+      if my_node.is_login? and !my_node.is_appengine?
+        success = Nginx.write_fullproxy_app_config(app, app_number, my_public,
+          my_private, proxy_port, login_ip, get_all_appengine_nodes())
+        if success
+          Nginx.reload
+        else
+          err_msg = "ERROR: Failure to create valid nginx config file" + \
+                    " for application #{app} full proxy."
+          place_error_app(app, err_msg)
+        end
+        @nginx_port += 1
+        @haproxy_port += 1
+      end
+
 
       if my_node.is_appengine?
         app_number = @nginx_port - Nginx::START_PORT
         start_port = HelperFunctions::APP_START_PORT
-        static_handlers = HelperFunctions.parse_static_data(app)
+        begin
+          static_handlers = HelperFunctions.parse_static_data(app)
+        rescue Exception => e
+          # This specific exception may be a json parse error
+          error_msg = "ERROR: Unable to parse app.yaml file for #{app}." + \
+                      " Exception of #{e.class} with message #{e.message}" 
+          place_error_app(app, error_msg)
+        end
         proxy_port = HAProxy.app_listen_port(app_number)
-        login_ip = get_login.public_ip
-        success = Nginx.write_app_config(app, app_number, my_public, proxy_port, static_handlers, login_ip)
-        if not success
-          Djinn.log_debug("ERROR: Failure to create valid nginx config file for application #{app}.")
-          next
+        login_ip = get_login.private_ip
+        success = Nginx.write_app_config(app, app_number, my_public, my_private,
+          proxy_port, static_handlers, login_ip)
+        if !success
+          error_msg = "ERROR: Failure to create valid nginx config file " + \
+                      "for application #{app}."
+          place_error_app(app, error_msg)
         end
         Collectd.write_app_config(app)
 
@@ -2810,17 +2885,17 @@ HOSTS
 
           xmpp_ip = get_login.public_ip
           pid = HelperFunctions.run_app(app, @appengine_port, 
-            @userappserver_private_ip, my_public, my_private, app_version, 
-            app_language, @nginx_port, xmpp_ip)
+            @userappserver_private_ip, get_load_balancer_ip(), my_private, 
+            app_version, app_language, @nginx_port, xmpp_ip)
           if pid == -1
-            Djinn.log_debug("ERROR: Unable to start application #{app}.") 
-            next
+            place_error_app(app, "ERROR: Unable to start application " + \
+                "#{app}. Please check the application logs.") 
           end
 
           pid_file_name = "/etc/appscale/#{app}-#{@appengine_port}.pid"
           HelperFunctions.write_file(pid_file_name, pid)
 
-          location = "http://#{my_public}:#{@appengine_port}#{warmup_url}"
+          location = "http://#{my_private}:#{@appengine_port}#{warmup_url}"
           wget_cmd = "wget #{WGET_OPTIONS} #{location}"
  
           Djinn.log_run(wget_cmd)
@@ -2829,7 +2904,7 @@ HOSTS
         }
 
         HAProxy.update_app_config(app, app_number, 
-          @app_info_map[app][:appengine], my_public)
+          @app_info_map[app][:appengine], my_private)
         Nginx.reload
         HAProxy.reload
         Collectd.restart
@@ -2857,7 +2932,7 @@ HOSTS
         login_ip = get_login.public_ip
 
         Thread.new {
-          haproxy_location = "http://#{my_public}:#{haproxy}#{warmup_url}"
+          haproxy_location = "http://#{my_private}:#{haproxy}#{warmup_url}"
           nginx_location = "http://#{my_public}:#{nginx}#{warmup_url}"
 
           wget_haproxy = "wget #{WGET_OPTIONS} #{haproxy_location}"
@@ -2898,7 +2973,7 @@ HOSTS
       return
     end
 
-    if @creds["autoscale"]
+    if @creds["autoscale"] == "true"
       Djinn.log_debug("Examining AppServers to autoscale them")
       perform_scaling_for_appservers()
     else
@@ -3098,15 +3173,16 @@ HOSTS
 
     if time_since_last_decision > SCALEDOWN_TIME_THRESHOLD and
       !@app_info_map[app_name][:appengine].nil? and 
-      appservers_running > 1
+      appservers_running > MIN_APPSERVERS_ON_THIS_NODE
 
       Djinn.log_debug("Removing an AppServer on this node for #{app_name}")
       remove_appserver_process(app_name)
       @last_decision[app_name] = Time.now.to_i
     elsif !@app_info_map[app_name][:appengine].nil? and 
-      appservers_running <= 1
+      appservers_running <= MIN_APPSERVERS_ON_THIS_NODE
 
-      Djinn.log_debug("Only 1 AppServer is running - don't kill it")
+      Djinn.log_debug("Only #{MIN_APPSERVERS_ON_THIS_NODE} AppServer(s) " +
+        "running - don't kill")
     elsif time_since_last_decision <= SCALEDOWN_TIME_THRESHOLD 
       Djinn.log_debug("Last decision was taken within the time threshold")
     end
@@ -3162,11 +3238,11 @@ HOSTS
     my_private = my_node.private_ip
     Djinn.log_debug("port apps error contains - #{@app_info_map[app][:appengine]}")
     HAProxy.update_app_config(app, app_number, @app_info_map[app][:appengine],
-      my_public)     
+      my_private)     
 
     Djinn.log_debug("Adding #{app_language} app #{app} on #{HelperFunctions.local_ip}:#{@appengine_port} ")
     xmpp_ip = get_login.public_ip
-    pid = HelperFunctions.run_app(app, @appengine_port, @userappserver_private_ip, my_public, my_private, app_version, app_language, nginx_port, xmpp_ip)
+    pid = HelperFunctions.run_app(app, @appengine_port, @userappserver_private_ip, get_load_balancer_ip(), my_private, app_version, app_language, nginx_port, xmpp_ip)
     if pid == -1
       Djinn.log_debug("ERROR: Unable to start application #{app} on port #{@appengine_port}.") 
       next
@@ -3174,7 +3250,7 @@ HOSTS
     pid_file_name = "#{APPSCALE_HOME}/.appscale/#{app}-#{@appengine_port}.pid"
     HelperFunctions.write_file(pid_file_name, pid)
 
-    location = "http://#{my_public}:#{@appengine_port}#{warmup_url}"
+    location = "http://#{my_private}:#{@appengine_port}#{warmup_url}"
     wget_cmd = "wget #{WGET_OPTIONS} #{location}"
         
     Djinn.log_run(wget_cmd)
@@ -3187,10 +3263,8 @@ HOSTS
 
     # add_instance_info = uac.add_instance(app, my_public, @nginx_port)
    
-    login_ip = get_login.public_ip
-
     Thread.new {
-      haproxy_location = "http://#{my_public}:#{haproxy_port}#{warmup_url}"
+      haproxy_location = "http://#{my_private}:#{haproxy_port}#{warmup_url}"
       nginx_location = "http://#{my_public}:#{nginx_port}#{warmup_url}"
 
       wget_haproxy = "wget #{WGET_OPTIONS} #{haproxy_location}"
@@ -3247,7 +3321,7 @@ HOSTS
     @app_info_map[app][:appengine].delete(port)
 
     HAProxy.update_app_config(app, app_number, @app_info_map[app][:appengine],
-      my_public)
+      my_private)
     HAProxy.reload
   end 
  
@@ -3394,11 +3468,18 @@ HOSTS
 
     my_public = my_node.public_ip
     my_private = my_node.private_ip
-    login_ip = get_login.public_ip
-
-    static_handlers = HelperFunctions.parse_static_data(app)
+    public_login_ip = get_login.public_ip
+    private_login_ip = get_login.private_ip
+  
+    begin
+      static_handlers = HelperFunctions.parse_static_data(app)
+    rescue Exception => e
+      error_msg = "ERROR: Unable to parse app.yaml file for #{app}." + \
+                  " Exception of type #{e.class}. Exception message #{e.message}"
+      place_error_app(app, error_msg)
+    end
     proxy_port = HAProxy.app_listen_port(app_number)
-    Nginx.write_app_config(app, app_number, my_public, proxy_port, static_handlers, login_ip)
+    Nginx.write_app_config(app, app_number, my_public, my_private, proxy_port, static_handlers, private_login_ip)
     HAProxy.write_app_config(app, app_number, num_servers, my_private)
     Collectd.write_app_config(app)
 
@@ -3406,7 +3487,7 @@ HOSTS
       Djinn.log_debug("Starting #{app_language} app #{app} on " +
         "#{HelperFunctions.local_ip}:#{port}")
       pid = HelperFunctions.run_app(app, port, @userappserver_private_ip, 
-        my_public, my_private, app_version, app_language, nginx_port, login_ip)
+        my_public, my_private, app_version, app_language, nginx_port, public_login_ip)
       pid_file_name = "#{APPSCALE_HOME}/.appscale/#{app}-#{port}.pid"
       HelperFunctions.write_file(pid_file_name, pid)
     }
