@@ -20,7 +20,7 @@ module ApplicationHelper
     if tokens.length != 4
       # guard against user-crafted cookies
       Rails.logger.info "saw a malformed cookie: [#{cookie_val}] - clearing it out"
-      cookies[:dev_appserver_login] = { :value => nil, :domain => UserTools.local_ip, :expires => Time.at(0) }
+      cookies[:dev_appserver_login] = { :value => nil, :domain => "appscale", :expires => Time.at(0) }
       return nil
     end
 

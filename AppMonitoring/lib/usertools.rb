@@ -26,7 +26,7 @@ class UserTools
 
     cookies[:dev_appserver_login] = {
       :value => cookie_value,
-      :domain => public_ip,
+      :domain => "appscale",
       :path => "/",
       :expires => 1.days.from_now
     }
